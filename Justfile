@@ -252,6 +252,13 @@ install-deps:
     cd ui/desktop && pnpm install
     cd documentation && yarn
 
+# Run the goose CLI wrapped by Headroom (github.com/headroomlabs-ai/headroom)
+# for local context compression. Requires `headroom` on PATH; see
+# documentation/docs/guides/headroom-integration.md.
+headroom-wrap:
+    @command -v headroom >/dev/null 2>&1 || (echo "headroom not found — install with: pip install 'headroom-ai[all]'" && exit 1)
+    headroom wrap goose
+
 ensure-release-branch:
     #!/usr/bin/env bash
     branch=$(git rev-parse --abbrev-ref HEAD); \
