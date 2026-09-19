@@ -149,6 +149,22 @@ pub fn parse_quantization_from_filename(filename: &str) -> String {
     parse_quantization(filename)
 }
 
+/// Reject HF-reported filenames that could escape the models directory once
+/// joined onto a local path: absolute paths (which `PathBuf::join` treats as
+/// a full replacement, e.g. a malicious `rfilename` of "/etc/cron.d/x") and
+/// `..` traversal. Legitimate repos do nest files one level deep (e.g.
+/// "BF16/model-00001-of-00002.gguf"), so plain subdirectories stay allowed.
+fn is_safe_repo_relative_path(name: &str) -> bool {
+    if name.is_empty() || name.contains('\0') {
+        return false;
+    }
+    let path = std::path::Path::new(name);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn parse_quantization(filename: &str) -> String {
     // Strip directory prefix (e.g. "Q5_K_M/Model-Q5_K_M-00001-of-00002.gguf")
     let basename = filename.rsplit('/').next().unwrap_or(filename);
@@ -354,6 +370,7 @@ pub async fn search_gguf_models(query: &str, limit: usize) -> Result<Vec<HfModel
             // is available. Files are fetched on-demand via `get_repo_gguf_variants`.
             let gguf_files: Vec<HfGgufFile> = siblings
                 .into_iter()
+                .filter(|s| is_safe_repo_relative_path(&s.rfilename))
                 .filter(|s| s.rfilename.ends_with(".gguf"))
                 .map(|s| {
                     let quantization = parse_quantization(&s.rfilename);
@@ -409,7 +426,12 @@ pub async fn get_repo_gguf_variants(repo_id: &str) -> Result<Vec<HfQuantVariant>
     }
 
     let model: HfApiModel = response.json().await?;
-    let siblings = model.siblings.unwrap_or_default();
+    let siblings: Vec<HfApiSibling> = model
+        .siblings
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| is_safe_repo_relative_path(&s.rfilename))
+        .collect();
 
     Ok(group_into_variants(repo_id, siblings))
 }
@@ -440,6 +462,7 @@ pub async fn get_repo_gguf_files(repo_id: &str) -> Result<Vec<HfGgufFile>> {
 
     let files = siblings
         .into_iter()
+        .filter(|s| is_safe_repo_relative_path(&s.rfilename))
         .filter(|s| s.rfilename.ends_with(".gguf"))
         .filter(|s| !is_shard_file(&s.rfilename))
         .filter(|s| is_model_file(&s.rfilename, &stem))
@@ -501,6 +524,7 @@ pub async fn resolve_model_spec_full(spec: &str) -> Result<(String, ResolvedMode
     // Collect all GGUF files matching the quantization
     let matching: Vec<_> = siblings
         .into_iter()
+        .filter(|s| is_safe_repo_relative_path(&s.rfilename))
         .filter(|s| {
             s.rfilename.ends_with(".gguf")
                 && is_model_file(&s.rfilename, &stem)
@@ -657,6 +681,21 @@ mod tests {
             parse_quantization("Q5_K_M/Model-Q5_K_M-00001-of-00002.gguf"),
             "Q5_K_M"
         );
+    }
+
+    #[test]
+    fn test_is_safe_repo_relative_path_allows_legitimate_names() {
+        assert!(is_safe_repo_relative_path("Model-Q4_K_M.gguf"));
+        assert!(is_safe_repo_relative_path("BF16/model-00001-of-00002.gguf"));
+    }
+
+    #[test]
+    fn test_is_safe_repo_relative_path_rejects_traversal() {
+        assert!(!is_safe_repo_relative_path(""));
+        assert!(!is_safe_repo_relative_path("/etc/cron.d/malicious"));
+        assert!(!is_safe_repo_relative_path("../../etc/passwd"));
+        assert!(!is_safe_repo_relative_path("models/../../etc/passwd"));
+        assert!(!is_safe_repo_relative_path("./sneaky.gguf"));
     }
 
     #[test]
