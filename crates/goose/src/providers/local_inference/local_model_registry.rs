@@ -154,8 +154,8 @@ pub const FEATURED_MODELS: &[FeaturedModel] = &[
         mmproj: None,
     },
     FeaturedModel {
-        spec: "bartowski/Hermes-2-Pro-Mistral-7B-GGUF:Q4_K_M",
-        native_tool_calling: false,
+        spec: "bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
+        native_tool_calling: true,
         mmproj: None,
     },
     FeaturedModel {
