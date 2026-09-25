@@ -1,0 +1,100 @@
+name: "Nightly Auto-Correct & Security Check"
+
+on:
+  schedule:
+    # Midnight UTC, every day
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  auto-correct:
+    name: Apply safe formatting/lint fixes
+    runs-on: ubuntu-latest
+    if: github.repository == 'Paarthesh/goose'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: main
+
+      - uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
+
+      - name: Install Dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install -y libdbus-1-dev gnome-keyring libxcb1-dev
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4  # v2.9.1
+
+      # Only mechanical, low-risk fixes: formatting and compiler-suggested
+      # clippy fixes. Anything clippy can't auto-apply is left for CI to
+      # flag and a human to fix — this job never touches semantics.
+      - name: Apply cargo fmt
+        run: cargo fmt --all
+
+      - name: Apply cargo clippy --fix
+        run: cargo clippy --workspace --all-targets --exclude v8 --fix --allow-dirty --allow-staged -- -D warnings || true
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open PR with fixes
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          DATE="$(date -u +%Y-%m-%d)"
+          BRANCH="auto-correct/$DATE"
+          git switch -c "$BRANCH"
+          git add -A
+          git commit -m "chore: nightly auto-correction ($DATE)"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            -B main \
+            -H "$BRANCH" \
+            --title "chore: nightly auto-correction $DATE" \
+            --body "Automated \`cargo fmt\` and \`cargo clippy --fix\` output from the nightly auto-correct workflow. Mechanical formatting/lint fixes only — no dependency or logic changes. Please review before merging."
+
+  security-check:
+    name: Check for vulnerable dependencies
+    runs-on: ubuntu-latest
+    if: github.repository == 'Paarthesh/goose'
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # https://github.com/EmbarkStudios/cargo-deny-action v2.0.15
+      - name: cargo-deny advisories check
+        id: deny
+        uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb
+        with:
+          command: check advisories
+
+      # Security findings are never auto-fixed here: a vulnerable dependency
+      # bump can change behavior and needs a human to review and test it.
+      - name: File an issue on advisory failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ github.repository }}" \
+            --title "Nightly security check: cargo-deny advisories failed ($(date -u +%Y-%m-%d))" \
+            --body "The nightly \`cargo-deny check advisories\` run found a security advisory or yanked crate. See the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details. Not auto-fixed — review and bump the affected dependency manually."
